@@ -98,6 +98,10 @@ second on a typical desktop.
 
 ## Development
 
+Detailed docs on the encode and decode pipelines, with Fortran-source
+correspondence tables, live in [`docs/encode.md`](docs/encode.md) and
+[`docs/decode.md`](docs/decode.md).
+
 The LDPC tables in `src/ft8lib/_tables.py` are generated from the WSJT-X
 Fortran sources by `tools/gen_tables.py` (expects the `wsjtx` source tree in
 the repository root).

@@ -1,0 +1,64 @@
+# .github/workflows/release.yml
+name: Build and publish
+
+on:
+  release:
+    types: [published]   # runs when you publish a GitHub Release
+  workflow_dispatch:      # lets you trigger a test run manually from the Actions tab
+  pull_request:           # builds (but does NOT publish) on PRs, so you catch breakage early
+
+jobs:
+  build_wheels:
+    name: Wheels on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest        # x86_64 Linux  -> manylinux + musllinux wheels
+          - ubuntu-24.04-arm     # aarch64 Linux (native ARM runner)
+          - windows-latest       # AMD64 Windows
+          - macos-latest         # arm64 (Apple Silicon)
+          - macos-13             # x86_64 (Intel Mac) - drop if you don't care about Intel Macs
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@v3.4   # check for a newer tag; 4.x is out as of mid-2026
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cibw-wheels-${{ matrix.os }}
+          path: ./wheelhouse/*.whl
+
+  build_sdist:
+    name: Build source distribution
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build sdist
+        run: pipx run build --sdist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cibw-sdist
+          path: dist/*.tar.gz
+
+  publish:
+    name: Publish to PyPI
+    needs: [build_wheels, build_sdist]
+    runs-on: ubuntu-latest
+    # only publish on an actual release, never on PRs or manual test runs
+    if: github.event_name == 'release' && github.event.action == 'published'
+    environment: pypi
+    permissions:
+      id-token: write   # REQUIRED for Trusted Publishing (no API token needed)
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: cibw-*
+          path: dist
+          merge-multiple: true   # flattens all artifacts into dist/
+
+      - uses: pypa/gh-action-pypi-publish@release/v1

@@ -1,6 +1,7 @@
 """ft8lib: FT8 and FT4 digital-mode encoder/decoder.
 
-A pure-Python (numpy) port of the FT8/FT4 protocol code from WSJT-X.
+A Python (numpy) port of the FT8/FT4 protocol code from WSJT-X, with the
+decoder hot paths in a small C extension.
 
 Quick start::
 

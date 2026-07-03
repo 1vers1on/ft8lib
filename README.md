@@ -1,6 +1,6 @@
 # ft8lib
 
-FT8 and FT4 amateur-radio digital modes in pure Python (numpy only).
+FT8 and FT4 amateur-radio digital modes in Python.
 
 `ft8lib` is a Python port of the FT8/FT4 protocol implementation from
 [WSJT-X](https://wsjt.sourceforge.io/wsjtx.html): message packing (77-bit),
@@ -14,7 +14,11 @@ sync, noncoherent multi-symbol soft demodulation, belief-propagation decoding).
 pip install .
 ```
 
-The only runtime dependency is numpy.
+The only runtime dependency is numpy.  The decode hot paths (LDPC belief
+propagation, ordered-statistics decoding, fine sync) are compiled from a
+small C extension at install time; if the extension is unavailable the
+library transparently falls back to slower pure-numpy implementations of
+the same algorithms.
 
 ## Usage
 

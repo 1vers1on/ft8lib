@@ -54,3 +54,5 @@ Thumbs.db
 # distribution artifacts
 *.whl
 wsjtx
+
+*.so

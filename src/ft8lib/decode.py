@@ -1,19 +1,3 @@
-"""FT8 and FT4 decoders.
-
-Ports of the WSJT-X decoding chains:
-
-  FT8: sync8.f90 (candidate search) -> ft8_downsample.f90 -> sync8d.f90
-       (fine time/freq sync) -> ft8b.f90 (soft symbol metrics) ->
-       bpdecode174_91.f90 -> unpack77
-
-  FT4: getcandidates4.f90 -> ft4_downsample.f90 -> sync4d.f90 ->
-       get_ft4_bitmetrics.f90 -> bpdecode174_91.f90 -> unpack77
-
-Differences from WSJT-X: no a-priori (AP) decoding, no ordered-statistics
-decoding (OSD), and no signal subtraction / multi-pass decoding.  Expect
-sensitivity within a couple of dB of WSJT-X at depth 1.
-"""
-
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -21,6 +5,7 @@ from typing import List, Optional
 
 import numpy as np
 
+from . import _kernels
 from .encode import ft4_tones_from_bits, ft8_tones_from_bits
 from .ldpc import bp_decode, decode174_91
 from .pack import HashTable, message_i3n3, pack77, unpack77
@@ -316,13 +301,18 @@ _FT8_NP2 = 2812
 _FT8_CSYNC = np.exp(
     1j * 2 * np.pi * np.array(FT8.COSTAS)[:, None] * np.arange(32)[None, :] / 32.0
 )  # (7, 32) Costas waveforms
+_FT8_CSYNC_CONJ = np.conj(_FT8_CSYNC)
 
 
 def _ft8_sync8d(cd0: np.ndarray, i0: int, ctwk: Optional[np.ndarray]) -> float:
     """Sync power for a downsampled FT8 signal (sync8d.f90)."""
+    if ctwk is None:
+        cc = _FT8_CSYNC_CONJ
+    else:
+        cc = np.conj(ctwk)[None, :] * _FT8_CSYNC_CONJ
+    if _kernels.HAVE_FAST:
+        return _kernels.sync8d(cd0, i0, cc, _FT8_NP2)
     sync = 0.0
-    csync = _FT8_CSYNC if ctwk is None else ctwk[None, :] * _FT8_CSYNC
-    cc = np.conj(csync)
     for i in range(7):
         for block in (0, 36, 72):
             i1 = i0 + (i + block) * 32
@@ -345,6 +335,7 @@ def _combo_tables():
 
 _FT8_COMBOS = _combo_tables()
 _ONE9 = (np.arange(512)[:, None] & (1 << np.arange(9))[None, :]) != 0  # [i, bitpos]
+_ONE8 = (np.arange(256)[:, None] & (1 << np.arange(8))[None, :]) != 0
 
 
 def _ft8_softbits(cs: np.ndarray) -> List[np.ndarray]:
@@ -360,29 +351,32 @@ def _ft8_softbits(cs: np.ndarray) -> List[np.ndarray]:
     for nsym in (1, 2, 3):
         nt = 2 ** (3 * nsym)
         combos = _FT8_COMBOS[nsym]
+        ibmax = {1: 2, 2: 5, 3: 8}[nsym]
+        kvals = np.arange(1, 30, nsym)
         for ihalf in (1, 2):
-            for k in range(1, 30, nsym):
-                ks = k + 7 if ihalf == 1 else k + 43
-                # symbol indices are 1-based in Fortran; cs column = ks-1
-                s2 = cs[combos[0], ks - 1]
-                for d in range(1, nsym):
-                    s2 = s2 + cs[combos[d], ks - 1 + d]
-                s2 = np.abs(s2)
-                i32 = 1 + (k - 1) * 3 + (ihalf - 1) * 87
-                ibmax = {1: 2, 2: 5, 3: 8}[nsym]
-                for ib in range(ibmax + 1):
-                    if i32 + ib > 174:
-                        continue
-                    mask = _ONE9[:nt, ibmax - ib]
-                    bm = s2[mask].max() - s2[~mask].max()
-                    if nsym == 1:
-                        bmeta[i32 + ib - 1] = bm
-                        den = max(s2[mask].max(), s2[~mask].max())
-                        bmetd[i32 + ib - 1] = bm / den if den > 0 else 0.0
-                    elif nsym == 2:
-                        bmetb[i32 + ib - 1] = bm
-                    else:
-                        bmetc[i32 + ib - 1] = bm
+            ks = kvals + (7 if ihalf == 1 else 43)
+            # symbol indices are 1-based in Fortran; cs column = ks-1
+            s2 = cs[combos[0]][:, ks - 1]
+            for d in range(1, nsym):
+                s2 = s2 + cs[combos[d]][:, ks - 1 + d]
+            s2 = np.abs(s2)                         # (nt, len(kvals))
+            i32 = 1 + (kvals - 1) * 3 + (ihalf - 1) * 87
+            for ib in range(ibmax + 1):
+                valid = i32 + ib <= 174
+                idx = i32[valid] + ib - 1
+                mask = _ONE9[:nt, ibmax - ib]
+                mx1 = s2[mask].max(axis=0)
+                mx0 = s2[~mask].max(axis=0)
+                bm = mx1 - mx0
+                if nsym == 1:
+                    bmeta[idx] = bm[valid]
+                    den = np.maximum(mx1, mx0)
+                    with np.errstate(invalid="ignore"):
+                        bmetd[idx] = np.where(den > 0, bm / den, 0.0)[valid]
+                elif nsym == 2:
+                    bmetb[idx] = bm[valid]
+                else:
+                    bmetc[idx] = bm[valid]
     stacked = np.stack([bmeta, bmetb, bmetc])
     bmete = stacked[np.abs(stacked).argmax(axis=0), np.arange(174)]
     return [LLR_SCALE * _normalize_bmet(b)
@@ -460,12 +454,11 @@ def decode_ft8(audio, freq_min: float = 200.0, freq_max: float = 4000.0,
             # extract symbol spectra
             cs = np.zeros((8, FT8.NN), dtype=complex)
             s8 = np.zeros((8, FT8.NN))
-            for k in range(FT8.NN):
-                i1 = ibest + k * 32
-                if 0 <= i1 and i1 + 31 <= _FT8_NP2 - 1:
-                    spec = np.fft.fft(cd0[i1:i1 + 32])
-                    cs[:, k] = spec[:8] / 1e3
-                    s8[:, k] = np.abs(spec[:8])
+            i1 = ibest + np.arange(FT8.NN) * 32
+            valid = (i1 >= 0) & (i1 + 31 <= _FT8_NP2 - 1)
+            spec = np.fft.fft(cd0[i1[valid, None] + np.arange(32)], axis=1)
+            cs[:, valid] = spec[:, :8].T / 1e3
+            s8[:, valid] = np.abs(spec[:, :8]).T
 
             # hard sync quality check
             nsync = 0
@@ -699,10 +692,8 @@ def _ft4_bitmetrics(cd: np.ndarray):
     cd: complex baseband, NN*NSS samples.  Returns (bitmetrics(206,3), badsync).
     """
     nss, nn = _FT4_NSS, FT4.NN
-    cs = np.zeros((4, nn), dtype=complex)
-    for k in range(nn):
-        spec = np.fft.fft(cd[k * nss:(k + 1) * nss])
-        cs[:, k] = spec[:4]
+    spec = np.fft.fft(cd[: nn * nss].reshape(nn, nss), axis=1)
+    cs = spec[:, :4].T.copy()
     s4 = np.abs(cs)
 
     nsync = 0
@@ -715,25 +706,23 @@ def _ft4_bitmetrics(cd: np.ndarray):
         return None, True
 
     bitmetrics = np.zeros((2 * nn, 3))
-    one8 = (np.arange(256)[:, None] & (1 << np.arange(8))[None, :]) != 0
     for nseq, nsym in enumerate((1, 2, 4), start=0):
         nt = 2 ** (2 * nsym)
         i = np.arange(nt)
         digs = [(i >> (2 * (nsym - 1 - d))) & 3 for d in range(nsym)]
         combos = [_FT4_GRAY[d] for d in digs]
-        for ks in range(1, nn - nsym + 2, nsym):
-            s2 = cs[combos[0], ks - 1]
-            for d in range(1, nsym):
-                s2 = s2 + cs[combos[d], ks - 1 + d]
-            s2 = np.abs(s2)
-            ipt = 1 + (ks - 1) * 2
-            ibmax = {1: 1, 2: 3, 4: 7}[nsym]
-            for ib in range(ibmax + 1):
-                if ipt + ib > 2 * nn:
-                    continue
-                mask = one8[:nt, ibmax - ib]
-                bm = s2[mask].max() - s2[~mask].max()
-                bitmetrics[ipt + ib - 1, nseq] = bm
+        ibmax = {1: 1, 2: 3, 4: 7}[nsym]
+        ksvals = np.arange(1, nn - nsym + 2, nsym)
+        s2 = cs[combos[0]][:, ksvals - 1]
+        for d in range(1, nsym):
+            s2 = s2 + cs[combos[d]][:, ksvals - 1 + d]
+        s2 = np.abs(s2)                             # (nt, len(ksvals))
+        ipt = 1 + (ksvals - 1) * 2
+        for ib in range(ibmax + 1):
+            valid = ipt + ib <= 2 * nn
+            mask = _ONE8[:nt, ibmax - ib]
+            bm = s2[mask].max(axis=0) - s2[~mask].max(axis=0)
+            bitmetrics[ipt[valid] + ib - 1, nseq] = bm[valid]
 
     bitmetrics[204:206, 1] = bitmetrics[204:206, 0]
     bitmetrics[200:204, 2] = bitmetrics[200:204, 1]

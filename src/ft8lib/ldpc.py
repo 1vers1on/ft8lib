@@ -18,8 +18,11 @@ from typing import Optional, Tuple
 
 import numpy as np
 
+from . import _kernels
 from ._tables import LDPC_GENERATOR_HEX, LDPC_MN, LDPC_NM, LDPC_NRW
 from .crc import crc14, crc14_check
+
+_FAST = _kernels.HAVE_FAST
 
 N = 174  # codeword bits
 K = 91   # message bits (77 + 14-bit CRC)
@@ -97,6 +100,17 @@ def bp_decode(
         ap_free = np.ones(N, dtype=bool)
     else:
         ap_free = np.asarray(apmask, dtype=np.int64) != 1
+
+    if _FAST:
+        status, cw, _, _ = _kernels.bp_hybrid(
+            llr, ap_free.astype(np.uint8), _NM, _NRW, _MN, _EDGE_SLOT,
+            max_iterations, -1)
+        if status == 1:
+            nharderrors = int(np.count_nonzero((2 * cw.astype(int) - 1) * llr < 0))
+            return cw[:77].copy(), cw, nharderrors
+        if status == -1:
+            return None, cw, -1
+        return None, (llr > 0).astype(np.uint8), -1
 
     tov = np.zeros((N, 3))          # check -> bit messages, per bit slot
     toc = np.zeros((M, 7))          # bit -> check messages, per check slot
@@ -186,6 +200,14 @@ def osd_decode(llr, norder: int = 2, apmask=None):
 
     # order columns by decreasing reliability
     order = np.argsort(-absrx, kind="stable")
+
+    if _FAST:
+        found, cw, nhardmin, dmin = _kernels.osd(rx, apm, _G_FULL, order,
+                                                 norder)
+        if not found:
+            return None, cw, nhardmin, dmin
+        return cw[:77].copy(), cw, nhardmin, dmin
+
     genmrb = _G_FULL[:, order].copy()
     indices = order.copy()
 
@@ -284,58 +306,69 @@ def decode174_91(
     if max_osd == 0:
         zsave.append(llr.copy())
 
-    tov = np.zeros((N, 3))
-    toc = np.where(_NM_VALID, llr[_NM_SAFE], 0.0)
-    zsum = np.zeros(N)
+    if _FAST:
+        status, cw, zsave_arr, nsave = _kernels.bp_hybrid(
+            llr, ap_free.astype(np.uint8), _NM, _NRW, _MN, _EDGE_SLOT,
+            max_iterations, max_osd)
+        if status == 1:
+            hdec = (llr >= 0).astype(np.uint8)
+            nharderrors = int((hdec ^ cw).sum())
+            dmin = float(((hdec ^ cw) * np.abs(llr)).sum())
+            return cw[:77].copy(), cw, nharderrors, dmin
+        zsave.extend(zsave_arr[i] for i in range(nsave))
+    else:
+        tov = np.zeros((N, 3))
+        toc = np.where(_NM_VALID, llr[_NM_SAFE], 0.0)
+        zsum = np.zeros(N)
 
-    ncnt = 0
-    nclast = 0
-    for iteration in range(max_iterations + 1):
-        zn = np.where(ap_free, llr + tov.sum(axis=1), llr)
-        zsum += zn
-        if 0 < iteration <= max_osd:
-            zsave.append(zsum.copy())
+        ncnt = 0
+        nclast = 0
+        for iteration in range(max_iterations + 1):
+            zn = np.where(ap_free, llr + tov.sum(axis=1), llr)
+            zsum += zn
+            if 0 < iteration <= max_osd:
+                zsave.append(zsum.copy())
 
-        cw = (zn > 0).astype(np.uint8)
-        synd = np.where(_NM_VALID, cw[_NM_SAFE], 0).sum(axis=1) % 2
-        if int(synd.sum()) == 0:
-            if crc14_check(cw[:K].tolist()):
-                hdec = (llr >= 0).astype(np.uint8)
-                nharderrors = int((hdec ^ cw).sum())
-                dmin = float(((hdec ^ cw) * np.abs(llr)).sum())
-                return cw[:77].copy(), cw, nharderrors, dmin
+            cw = (zn > 0).astype(np.uint8)
+            synd = np.where(_NM_VALID, cw[_NM_SAFE], 0).sum(axis=1) % 2
+            if int(synd.sum()) == 0:
+                if crc14_check(cw[:K].tolist()):
+                    hdec = (llr >= 0).astype(np.uint8)
+                    nharderrors = int((hdec ^ cw).sum())
+                    dmin = float(((hdec ^ cw) * np.abs(llr)).sum())
+                    return cw[:77].copy(), cw, nharderrors, dmin
 
-        ncheck = int(synd.sum())
-        if iteration > 0:
-            if ncheck - nclast < 0:
-                ncnt = 0
-            else:
-                ncnt += 1
-            if ncnt >= 5 and iteration >= 10 and ncheck > 15:
-                break
-        nclast = ncheck
+            ncheck = int(synd.sum())
+            if iteration > 0:
+                if ncheck - nclast < 0:
+                    ncnt = 0
+                else:
+                    ncnt += 1
+                if ncnt >= 5 and iteration >= 10 and ncheck > 15:
+                    break
+            nclast = ncheck
 
-        contrib = np.zeros((M, 7))
-        for s in range(3):
-            checks = _MN[:, s]
-            slots = _EDGE_SLOT[:, s]
-            contrib[checks, slots] = zn - tov[:, s]
-        toc = np.where(_NM_VALID, contrib, 0.0)
+            contrib = np.zeros((M, 7))
+            for s in range(3):
+                checks = _MN[:, s]
+                slots = _EDGE_SLOT[:, s]
+                contrib[checks, slots] = zn - tov[:, s]
+            toc = np.where(_NM_VALID, contrib, 0.0)
 
-        tanhtoc = np.tanh(-toc / 2.0)
-        tanhtoc = np.where(_NM_VALID, tanhtoc, 1.0)
-        prod = tanhtoc.prod(axis=1)
-        with np.errstate(divide="ignore", invalid="ignore"):
-            excl = np.where(np.abs(tanhtoc) > 1e-12, prod[:, None] / tanhtoc, 0.0)
-            bad = np.abs(tanhtoc) <= 1e-12
-            if bad.any():
-                for i, s in zip(*np.nonzero(bad)):
-                    mask = np.ones(7, dtype=bool)
-                    mask[s] = False
-                    excl[i, s] = tanhtoc[i][mask].prod()
-        tmn = excl[_MN, _EDGE_SLOT]
-        tmn = np.clip(-tmn, -0.9999999999, 0.9999999999)
-        tov = 2.0 * np.arctanh(tmn)
+            tanhtoc = np.tanh(-toc / 2.0)
+            tanhtoc = np.where(_NM_VALID, tanhtoc, 1.0)
+            prod = tanhtoc.prod(axis=1)
+            with np.errstate(divide="ignore", invalid="ignore"):
+                excl = np.where(np.abs(tanhtoc) > 1e-12, prod[:, None] / tanhtoc, 0.0)
+                bad = np.abs(tanhtoc) <= 1e-12
+                if bad.any():
+                    for i, s in zip(*np.nonzero(bad)):
+                        mask = np.ones(7, dtype=bool)
+                        mask[s] = False
+                        excl[i, s] = tanhtoc[i][mask].prod()
+            tmn = excl[_MN, _EDGE_SLOT]
+            tmn = np.clip(-tmn, -0.9999999999, 0.9999999999)
+            tov = 2.0 * np.arctanh(tmn)
 
     # BP failed; try ordered-statistics decoding on the saved LLR sums
     apmask_arr = None if apmask is None else np.asarray(apmask)

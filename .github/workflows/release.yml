@@ -19,7 +19,7 @@ jobs:
           - ubuntu-24.04-arm     # aarch64 Linux (native ARM runner)
           - windows-latest       # AMD64 Windows
           - macos-latest         # arm64 (Apple Silicon)
-          - macos-13             # x86_64 (Intel Mac) - drop if you don't care about Intel Macs
+          # - macos-13             # x86_64 (Intel Mac) - drop if you don't care about Intel Macs
     steps:
       - uses: actions/checkout@v4
 

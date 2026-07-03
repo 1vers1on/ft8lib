@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ft8lib"
+version = "0.2.0"
+description = "FT8 and FT4 amateur-radio digital mode encoder/decoder (pure Python port of WSJT-X)"
+readme = "README.md"
+requires-python = ">=3.9"
+license = "GPL-3.0-or-later"
+authors = [{ name = "Ellie", email = "ellie@ellierf.com" }]
+keywords = ["ft8", "ft4", "wsjt-x", "amateur radio", "ham radio", "digital modes", "ldpc"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Topic :: Communications :: Ham Radio",
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+]
+dependencies = ["numpy>=1.22"]
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
+
+[project.scripts]
+ft8lib = "ft8lib.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

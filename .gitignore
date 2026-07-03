@@ -1,0 +1,56 @@
+# bytecode / caches
+__pycache__/
+*.py[cod]
+*$py.class
+
+# build / packaging
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# virtual envs
+.venv/
+venv/
+env/
+ENV/
+
+# testing / tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+.tox/
+.nox/
+
+# jupyter
+.ipynb_checkpoints/
+
+# mypy / pyre
+.dmypy.json
+dmypy.json
+
+# packaging tools
+pip-wheel-metadata/
+wheelhouse/
+
+# IDEs
+.vscode/
+.idea/
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# env files (optional but common)
+.env
+.env.*
+
+# logs
+*.log
+
+# distribution artifacts
+*.whl
+wsjtx

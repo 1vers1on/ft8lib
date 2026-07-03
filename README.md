@@ -1,12 +1,14 @@
 # ft8lib
 
-FT8 and FT4 amateur-radio digital modes in Python.
+FT8, FT4 and WSPR amateur-radio digital modes in Python.
 
 `ft8lib` is a Python port of the FT8/FT4 protocol implementation from
 [WSJT-X](https://wsjt.sourceforge.io/wsjtx.html): message packing (77-bit),
 CRC-14, LDPC(174,91) forward error correction, GFSK waveform synthesis, and a
 full receive chain (candidate sync search, downconversion, fine time/frequency
 sync, noncoherent multi-symbol soft demodulation, belief-propagation decoding).
+It also includes a WSPR encoder and a port of the `wsprd` decoder (sync,
+noncoherent demodulation, Fano sequential decoding, signal subtraction).
 
 ## Installation
 
@@ -43,6 +45,11 @@ for result in ft8lib.decode_ft8(period):
 # FT8 -15 dB  DT +0.00 s  1500.0 Hz  CQ K1ABC FN42
 
 for result in ft8lib.decode_ft4(audio_7p5s):
+    print(result)
+
+# --- WSPR: 2-minute periods, 110.6 s transmissions near 1500 Hz ---
+wave = ft8lib.encode_wspr("K1ABC FN42 37")
+for result in ft8lib.decode_wspr(audio_2min):
     print(result)
 ```
 
@@ -112,11 +119,17 @@ point, single signal):
 | FT8  | −19 dB               | −21 dB               |
 | FT4  | −16 dB               | −17.5 dB             |
 
-The port implements the belief-propagation decoder with all five WSJT-X
-metric passes, but not ordered-statistics decoding (OSD), a-priori (AP)
-decoding, or multi-pass signal subtraction, which account for the remaining
-1–2 dB. A full 15 s FT8 period with a busy band decodes in well under a
-second on a typical desktop.
+The port implements the full WSJT-X machinery — all five metric passes,
+ordered-statistics decoding (OSD), a-priori (AP) decoding and multi-pass
+signal subtraction; the remaining 1–2 dB is algorithm tuning headroom. A
+full 15 s FT8 period with a busy band decodes in well under a second on a
+typical desktop.
+
+## Documentation
+
+A comprehensive usage guide for the whole public API — encoding, decoding,
+realtime operation, WSPR, hash tables and the CLI — lives in
+[`docs/usage.md`](docs/usage.md).
 
 ## Development
 

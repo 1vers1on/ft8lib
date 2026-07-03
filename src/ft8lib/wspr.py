@@ -637,7 +637,7 @@ def decode_wspr(audio, freq_min: float = 1390.0, freq_max: float = 1610.0,
                 uniques.append((callsign, f1))
                 msg = " ".join(message.split())
                 results[msg] = Decode(
-                    message=msg, snr=round(cand.snr), dt=shift1 * _DT - 0.5,
+                    message=msg, snr=round(cand.snr), dt=shift1 * _DT - 1.0,
                     freq=1500.0 + f1, sync=cand.sync, mode="WSPR",
                     drift=drift1)
         ipass += 1

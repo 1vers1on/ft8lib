@@ -42,10 +42,11 @@ Same shape of pipeline for FT4: 103 tones, 60480 samples (5.04 s), meant to
 start 0.5 s into the 7.5 s cycle.
 
 Both raise `ValueError` if the message can't be encoded — `_check_roundtrip`
-immediately unpacks the freshly packed bits and rejects anything that
-doesn't come back byte-for-byte identical (guards against `pack77` accepting
-a message it can't faithfully represent, e.g. an out-of-table grid or
-callsign).
+immediately unpacks the freshly packed bits and rejects anything whose
+unpack fails. Note this checks only that the bits *unpack successfully*,
+not that the text matches the input: a message that doesn't parse as any
+structured type falls back to free text (truncated to 13 characters), so
+e.g. `"CQ K1ABC XX99"` encodes as `"CQ K1ABC"` rather than raising.
 
 `hashes` is an optional [`HashTable`](../src/ft8lib/pack.py) — pass the same
 table you use for decoding if the message contains a `<hashed>` nonstandard

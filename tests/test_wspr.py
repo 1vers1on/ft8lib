@@ -5,7 +5,8 @@ import numpy as np
 from ft8lib import WSPR, decode_wspr, encode_wspr, wspr_tones_from_message
 
 
-def _embed(wave, nmax, start=6000):
+def _embed(wave, nmax, start=12000):
+    # transmissions nominally start 1 s into the even 2-minute cycle
     audio = np.zeros(nmax)
     audio[start:start + len(wave)] += wave
     return audio

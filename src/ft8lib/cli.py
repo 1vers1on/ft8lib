@@ -8,8 +8,16 @@ import wave as wavmod
 
 import numpy as np
 
-from . import __version__, decode_ft4, decode_ft8, encode_ft4, encode_ft8
-from .protocol import FT4, FT8, SAMPLE_RATE
+from . import (
+    __version__,
+    decode_ft4,
+    decode_ft8,
+    decode_wspr,
+    encode_ft4,
+    encode_ft8,
+    encode_wspr,
+)
+from .protocol import FT4, FT8, SAMPLE_RATE, WSPR
 
 
 def _read_wav(path: str) -> np.ndarray:
@@ -56,28 +64,28 @@ def main(argv=None) -> int:
     enc = sub.add_parser("encode", help="encode a message to a WAV file")
     enc.add_argument("message", help='message text, e.g. "CQ K1ABC FN42"')
     enc.add_argument("output", help="output WAV path (12 kHz, 16-bit mono)")
-    enc.add_argument("-m", "--mode", choices=["ft8", "ft4"], default="ft8")
+    enc.add_argument("-m", "--mode", choices=["ft8", "ft4", "wspr"], default="ft8")
     enc.add_argument("-f", "--freq", type=float, default=1500.0,
                      help="audio frequency in Hz (default 1500)")
     enc.add_argument("--full-period", action="store_true",
-                     help="pad to a full T/R period with 0.5 s leading delay")
+                     help="pad to a full T/R period with the nominal "
+                          "leading delay (0.5 s; WSPR 1 s)")
 
     dec = sub.add_parser("decode", help="decode a WAV recording")
     dec.add_argument("input", help="input WAV path (any rate; resampled to 12 kHz)")
-    dec.add_argument("-m", "--mode", choices=["ft8", "ft4"], default="ft8")
-    dec.add_argument("--freq-min", type=float, default=200.0)
-    dec.add_argument("--freq-max", type=float, default=4000.0)
+    dec.add_argument("-m", "--mode", choices=["ft8", "ft4", "wspr"], default="ft8")
+    dec.add_argument("--freq-min", type=float, default=None)
+    dec.add_argument("--freq-max", type=float, default=None)
 
     args = parser.parse_args(argv)
 
     if args.command == "encode":
-        wave = (encode_ft8 if args.mode == "ft8" else encode_ft4)(
-            args.message, f0=args.freq
-        )
+        encoder = {"ft8": encode_ft8, "ft4": encode_ft4, "wspr": encode_wspr}
+        wave = encoder[args.mode](args.message, f0=args.freq)
         if args.full_period:
-            period = FT8.NMAX if args.mode == "ft8" else FT4.NMAX
-            padded = np.zeros(period)
-            start = SAMPLE_RATE // 2
+            mode_cls = {"ft8": FT8, "ft4": FT4, "wspr": WSPR}[args.mode]
+            padded = np.zeros(mode_cls.NMAX)
+            start = SAMPLE_RATE if args.mode == "wspr" else SAMPLE_RATE // 2
             padded[start:start + len(wave)] = wave
             wave = padded
         _write_wav(args.output, wave)
@@ -86,9 +94,13 @@ def main(argv=None) -> int:
         return 0
 
     audio = _read_wav(args.input)
-    results = (decode_ft8 if args.mode == "ft8" else decode_ft4)(
-        audio, freq_min=args.freq_min, freq_max=args.freq_max
-    )
+    decoder = {"ft8": decode_ft8, "ft4": decode_ft4, "wspr": decode_wspr}
+    kwargs = {}
+    if args.freq_min is not None:
+        kwargs["freq_min"] = args.freq_min
+    if args.freq_max is not None:
+        kwargs["freq_max"] = args.freq_max
+    results = decoder[args.mode](audio, **kwargs)
     for r in results:
         print(r)
     if not results:

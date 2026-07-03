@@ -1,7 +1,7 @@
-"""Protocol constants for FT8 and FT4.
+"""Protocol constants for FT8, FT4 and WSPR.
 
-From WSJT-X lib/ft8/ft8_params.f90, lib/ft4/ft4_params.f90, genft8.f90 and
-genft4.f90.
+From WSJT-X lib/ft8/ft8_params.f90, lib/ft4/ft4_params.f90, genft8.f90,
+genft4.f90 and lib/wsprd/wspr_params.f90.
 """
 
 from __future__ import annotations
@@ -69,6 +69,38 @@ class FT4:
          1, 1, 0, 1, 1, 0, 1, 0, 0, 1, 0, 1, 1, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0,
          1, 0, 0, 1, 1, 1, 1, 0, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 1, 0, 1, 1, 1,
          1, 1, 0, 0, 0, 1, 0, 1],
+        dtype=np.uint8,
+    )
+
+
+class WSPR:
+    NAME = "WSPR"
+    NN = 162                # channel symbols
+    NSPS = 8192             # samples per symbol at 12000 S/s
+    NZ = NSPS * NN          # samples in full waveform (1327104, 110.6 s)
+    NMAX = 120 * SAMPLE_RATE   # samples in a receive period (2 minutes)
+    NDOWN = 32              # downsample factor: decoder runs at 375 S/s
+    FS_DEC = SAMPLE_RATE / NDOWN        # 375.0
+    NSPS_DEC = NSPS // NDOWN            # 256 samples/symbol when decoding
+    NPTS_DEC = 46080        # downsampled samples the decoder works on
+    TONE_SPACING = SAMPLE_RATE / NSPS   # 1.4648 Hz
+    SYMBOL_PERIOD = NSPS / SAMPLE_RATE  # 0.6827 s
+    PERIOD = 120.0          # T/R cycle (s)
+    NTONES = 4
+    POLY1 = 0xF2D05351      # Layland-Lushbaugh convolutional code, K=32 r=1/2
+    POLY2 = 0xE4613C47
+
+    # 162-bit pseudo-random sync vector (pr3 in wsprd.c)
+    SYNC = np.array(
+        [1, 1, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, 1, 1, 0, 0, 0, 1, 0,
+         0, 1, 0, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 1, 0, 1,
+         0, 0, 0, 0, 0, 0, 1, 0, 1, 1, 0, 0, 1, 1, 0, 1, 0, 0, 0, 1,
+         1, 0, 1, 0, 0, 0, 0, 1, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 0, 1,
+         0, 0, 1, 0, 1, 1, 0, 0, 0, 1, 1, 0, 1, 0, 1, 0, 0, 0, 1, 0,
+         0, 0, 0, 0, 1, 0, 0, 1, 0, 0, 1, 1, 1, 0, 1, 1, 0, 0, 1, 1,
+         0, 1, 0, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0, 1, 0, 1, 0, 0, 1, 1,
+         0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 1, 0, 1, 1, 0, 0, 0, 1, 1, 0,
+         0, 0],
         dtype=np.uint8,
     )
 

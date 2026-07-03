@@ -1,10 +1,11 @@
 """Dispatch to the compiled decoder kernels (_ckernels.c) when available.
 
 The C extension implements the decode hot paths — the LDPC belief-
-propagation loop, the OSD Gaussian elimination, and the FT8 fine-sync
-correlation — as direct transcriptions of the WSJT-X Fortran.  When the
-extension was not built, ldpc.py and decode.py fall back to their pure
-numpy implementations (several times slower, same results).
+propagation loop, the OSD Gaussian elimination, the FT8 fine-sync
+correlation, and the WSPR demodulator and Fano sequential decoder — as
+direct transcriptions of the WSJT-X Fortran/C.  When the extension was
+not built, ldpc.py, decode.py and wspr.py fall back to their pure
+numpy/Python implementations (several times slower, same results).
 """
 
 from __future__ import annotations
@@ -17,6 +18,9 @@ try:
         osd,
         osd_ge,
         sync8d,
+        wspr_fano,
+        wspr_ncsd,
+        wspr_sync_demod,
     )
 
     HAVE_FAST = True

@@ -1,9 +1,11 @@
 /* C kernels for the decoder hot paths.
  *
  * Direct transcriptions of the WSJT-X Fortran inner loops
- * (bpdecode174_91.f90, osd174_91.f90, sync8d.f90) exposed to Python.
- * The pure-numpy implementations in ldpc.py / decode.py remain as the
- * fallback when this module is unavailable.
+ * (bpdecode174_91.f90, osd174_91.f90, sync8d.f90) and of the WSPR
+ * demodulator/decoder (lib/wsprd/wsprd.c sync_and_demodulate and
+ * noncoherent_sequence_detection, lib/wsprd/fano.c) exposed to Python.
+ * The pure-numpy implementations in ldpc.py / decode.py / wspr.py remain
+ * as the fallback when this module is unavailable.
  */
 
 #define PY_SSIZE_T_CLEAN
@@ -693,6 +695,407 @@ crc14_check(PyObject *self, PyObject *args)
     return PyBool_FromLong(ok);
 }
 
+/* ------------------------------------------------------------------------
+ * WSPR kernels (ports of lib/wsprd/wsprd.c and lib/wsprd/fano.c)
+ * ------------------------------------------------------------------------ */
+
+#define WSPR_NSYM 162
+#define WSPR_NSPS 256          /* samples per symbol at 375 S/s */
+#define WSPR_POLY1 0xf2d05351u /* Layland-Lushbaugh K=32 r=1/2 code */
+#define WSPR_POLY2 0xe4613c47u
+
+/* 162-bit pseudo-random sync vector (pr3 in wsprd.c) */
+static const unsigned char wspr_pr3[WSPR_NSYM] = {
+    1, 1, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, 1, 1, 0, 0, 0, 1, 0,
+    0, 1, 0, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 1, 0, 1,
+    0, 0, 0, 0, 0, 0, 1, 0, 1, 1, 0, 0, 1, 1, 0, 1, 0, 0, 0, 1,
+    1, 0, 1, 0, 0, 0, 0, 1, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 0, 1,
+    0, 0, 1, 0, 1, 1, 0, 0, 0, 1, 1, 0, 1, 0, 1, 0, 0, 0, 1, 0,
+    0, 0, 0, 0, 1, 0, 0, 1, 0, 0, 1, 1, 1, 0, 1, 1, 0, 0, 1, 1,
+    0, 1, 0, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0, 1, 0, 1, 0, 0, 1, 1,
+    0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 1, 0, 1, 1, 0, 0, 0, 1, 1, 0,
+    0, 0};
+
+/* Per-symbol correlations of the baseband signal against the four FSK
+ * tones, with the drift model of wsprd.c.  For each symbol i fills
+ * zr/zi[tone][i]; the tone mixing tables are recomputed only when the
+ * symbol frequency changes (drift != 0), like the fplast cache in C.
+ * When cf/sf are non-NULL also stores each tone's per-symbol phase
+ * advance factor (for block demodulation).
+ */
+static void
+wspr_tone_corr(const double *cd, npy_intp npts, double f0, double drift,
+               long lag, double zr[4][WSPR_NSYM], double zi[4][WSPR_NSYM],
+               double cf[4][WSPR_NSYM], double sf[4][WSPR_NSYM])
+{
+    const double dt = 1.0 / 375.0, df = 375.0 / 256.0;
+    const double twopidt = 2.0 * FT8LIB_PI * dt;
+    const double df15 = df * 1.5, df05 = df * 0.5;
+    double c0[257], s0[257], c1[257], s1[257];
+    double c2[257], s2[257], c3[257], s3[257];
+    double fplast = -10000.0;
+    int i, j, t;
+    long k;
+
+    for (i = 0; i < WSPR_NSYM; i++) {
+        double fp = f0 + (drift / 2.0) * ((double)i - 81.0) / 81.0;
+        if (i == 0 || fp != fplast) {
+            double dphi0 = twopidt * (fp - df15);
+            double dphi1 = twopidt * (fp - df05);
+            double dphi2 = twopidt * (fp + df05);
+            double dphi3 = twopidt * (fp + df15);
+            double cd0 = cos(dphi0), sd0 = sin(dphi0);
+            double cd1 = cos(dphi1), sd1 = sin(dphi1);
+            double cd2 = cos(dphi2), sd2 = sin(dphi2);
+            double cd3 = cos(dphi3), sd3 = sin(dphi3);
+            c0[0] = 1; s0[0] = 0; c1[0] = 1; s1[0] = 0;
+            c2[0] = 1; s2[0] = 0; c3[0] = 1; s3[0] = 0;
+            for (j = 1; j < 257; j++) {
+                c0[j] = c0[j - 1] * cd0 - s0[j - 1] * sd0;
+                s0[j] = c0[j - 1] * sd0 + s0[j - 1] * cd0;
+                c1[j] = c1[j - 1] * cd1 - s1[j - 1] * sd1;
+                s1[j] = c1[j - 1] * sd1 + s1[j - 1] * cd1;
+                c2[j] = c2[j - 1] * cd2 - s2[j - 1] * sd2;
+                s2[j] = c2[j - 1] * sd2 + s2[j - 1] * cd2;
+                c3[j] = c3[j - 1] * cd3 - s3[j - 1] * sd3;
+                s3[j] = c3[j - 1] * sd3 + s3[j - 1] * cd3;
+            }
+            fplast = fp;
+        }
+        if (cf != NULL) {
+            cf[0][i] = c0[256]; sf[0][i] = s0[256];
+            cf[1][i] = c1[256]; sf[1][i] = s1[256];
+            cf[2][i] = c2[256]; sf[2][i] = s2[256];
+            cf[3][i] = c3[256]; sf[3][i] = s3[256];
+        }
+        for (t = 0; t < 4; t++) {
+            zr[t][i] = 0.0;
+            zi[t][i] = 0.0;
+        }
+        for (j = 0; j < 256; j++) {
+            k = lag + (long)i * 256 + j;
+            if (k > 0 && k < npts) {
+                double id = cd[2 * k], qd = cd[2 * k + 1];
+                zr[0][i] += id * c0[j] + qd * s0[j];
+                zi[0][i] += -id * s0[j] + qd * c0[j];
+                zr[1][i] += id * c1[j] + qd * s1[j];
+                zi[1][i] += -id * s1[j] + qd * c1[j];
+                zr[2][i] += id * c2[j] + qd * s2[j];
+                zi[2][i] += -id * s2[j] + qd * c2[j];
+                zr[3][i] += id * c3[j] + qd * s3[j];
+                zi[3][i] += -id * s3[j] + qd * c3[j];
+            }
+        }
+    }
+}
+
+/* wspr_sync_demod(c, f1, ifmin, ifmax, fstep, lagmin, lagmax, lagstep,
+ *                 drift1) -> (sync, freq, shift)
+ *
+ * Modes 0/1 of sync_and_demodulate in wsprd.c: search the given lag and
+ * frequency grids for the best sync-vector correlation.
+ */
+static PyObject *
+wspr_sync_demod(PyObject *self, PyObject *args)
+{
+    PyObject *c_o;
+    double f1, fstep, drift1;
+    long ifmin, ifmax, lagmin, lagmax, lagstep;
+    PyArrayObject *c_a;
+
+    if (!PyArg_ParseTuple(args, "Odlldllld", &c_o, &f1, &ifmin, &ifmax,
+                          &fstep, &lagmin, &lagmax, &lagstep, &drift1))
+        return NULL;
+    c_a = as_array(c_o, NPY_CDOUBLE, 1, "c");
+    if (!c_a)
+        return NULL;
+
+    {
+        const double *cd = (const double *)PyArray_DATA(c_a);
+        const npy_intp npts = PyArray_DIM(c_a, 0);
+        double zr[4][WSPR_NSYM], zi[4][WSPR_NSYM];
+        double syncmax = -1e30, fbest = f1;
+        long best_shift = lagmin, lag, ifreq;
+        int i;
+
+        Py_BEGIN_ALLOW_THREADS;
+        for (ifreq = ifmin; ifreq <= ifmax; ifreq++) {
+            double f0 = f1 + ifreq * fstep;
+            for (lag = lagmin; lag <= lagmax; lag += lagstep) {
+                double ss = 0.0, totp = 0.0;
+                wspr_tone_corr(cd, npts, f0, drift1, lag, zr, zi, NULL, NULL);
+                for (i = 0; i < WSPR_NSYM; i++) {
+                    double p0 = sqrt(zr[0][i] * zr[0][i] + zi[0][i] * zi[0][i]);
+                    double p1 = sqrt(zr[1][i] * zr[1][i] + zi[1][i] * zi[1][i]);
+                    double p2 = sqrt(zr[2][i] * zr[2][i] + zi[2][i] * zi[2][i]);
+                    double p3 = sqrt(zr[3][i] * zr[3][i] + zi[3][i] * zi[3][i]);
+                    double cmet = (p1 + p3) - (p0 + p2);
+                    totp += p0 + p1 + p2 + p3;
+                    ss += wspr_pr3[i] ? cmet : -cmet;
+                }
+                ss = ss / totp;
+                if (ss > syncmax) {
+                    syncmax = ss;
+                    best_shift = lag;
+                    fbest = f0;
+                }
+            }
+        }
+        Py_END_ALLOW_THREADS;
+
+        Py_DECREF(c_a);
+        return Py_BuildValue("ddl", syncmax, fbest, best_shift);
+    }
+}
+
+/* wspr_ncsd(c, f1, shift1, drift1, symfac, nblock, bitmetric) -> symbols
+ *
+ * Noncoherent sequence detection (block demodulation) of wsprd.c:
+ * 162 soft symbols as uint8 (128 + clipped soft value).
+ */
+static PyObject *
+wspr_ncsd(PyObject *self, PyObject *args)
+{
+    PyObject *c_o;
+    double f1, drift1;
+    long shift1, symfac, nblock, bitmetric;
+    PyArrayObject *c_a, *sym_a;
+    npy_intp dims[1] = {WSPR_NSYM};
+
+    if (!PyArg_ParseTuple(args, "Odldlll", &c_o, &f1, &shift1, &drift1,
+                          &symfac, &nblock, &bitmetric))
+        return NULL;
+    c_a = as_array(c_o, NPY_CDOUBLE, 1, "c");
+    if (!c_a)
+        return NULL;
+    sym_a = (PyArrayObject *)PyArray_ZEROS(1, dims, NPY_UINT8, 0);
+    if (!sym_a) {
+        Py_DECREF(c_a);
+        return NULL;
+    }
+
+    {
+        const double *cd = (const double *)PyArray_DATA(c_a);
+        const npy_intp npts = PyArray_DIM(c_a, 0);
+        uint8_t *symbols = (uint8_t *)PyArray_DATA(sym_a);
+        double zr[4][WSPR_NSYM], zi[4][WSPR_NSYM];
+        double cf[4][WSPR_NSYM], sf[4][WSPR_NSYM];
+        double p[8], fsymb[WSPR_NSYM];
+        double fsum = 0.0, f2sum = 0.0, fac;
+        long nseq = 1L << nblock;
+        int i, j, ib, b, itone, imask;
+
+        Py_BEGIN_ALLOW_THREADS;
+        wspr_tone_corr(cd, npts, f1, drift1, shift1, zr, zi, cf, sf);
+        for (i = 0; i < WSPR_NSYM; i += nblock) {
+            for (j = 0; j < nseq; j++) {
+                double xi = 0.0, xq = 0.0, cm = 1.0, sm = 0.0;
+                for (ib = 0; ib < nblock; ib++) {
+                    double cmp, smp;
+                    b = (j >> (nblock - 1 - ib)) & 1;
+                    itone = wspr_pr3[i + ib] + 2 * b;
+                    xi += zr[itone][i + ib] * cm + zi[itone][i + ib] * sm;
+                    xq += zi[itone][i + ib] * cm - zr[itone][i + ib] * sm;
+                    cmp = cf[itone][i + ib] * cm - sf[itone][i + ib] * sm;
+                    smp = sf[itone][i + ib] * cm + cf[itone][i + ib] * sm;
+                    cm = cmp;
+                    sm = smp;
+                }
+                p[j] = sqrt(xi * xi + xq * xq);
+            }
+            for (ib = 0; ib < nblock; ib++) {
+                double xm1 = 0.0, xm0 = 0.0;
+                imask = 1 << (nblock - 1 - ib);
+                for (j = 0; j < nseq; j++) {
+                    if ((j & imask) != 0 && p[j] > xm1)
+                        xm1 = p[j];
+                    if ((j & imask) == 0 && p[j] > xm0)
+                        xm0 = p[j];
+                }
+                fsymb[i + ib] = xm1 - xm0;
+                if (bitmetric)
+                    fsymb[i + ib] /= (xm1 > xm0 ? xm1 : xm0);
+            }
+        }
+        for (i = 0; i < WSPR_NSYM; i++) {
+            fsum += fsymb[i] / 162.0;
+            f2sum += fsymb[i] * fsymb[i] / 162.0;
+        }
+        fac = sqrt(f2sum - fsum * fsum);
+        if (!(fac > 0.0))
+            fac = 1.0;
+        for (i = 0; i < WSPR_NSYM; i++) {
+            double v = symfac * fsymb[i] / fac;
+            if (v > 127.0)
+                v = 127.0;
+            if (v < -128.0)
+                v = -128.0;
+            symbols[i] = (uint8_t)(v + 128.0);
+        }
+        Py_END_ALLOW_THREADS;
+    }
+    Py_DECREF(c_a);
+    return (PyObject *)sym_a;
+}
+
+static int
+wspr_par32(uint32_t v)
+{
+    v ^= v >> 16;
+    v ^= v >> 8;
+    v ^= v >> 4;
+    return (0x6996 >> (v & 0xf)) & 1;
+}
+
+/* branch symbol pair for an encoder state (ENCODE macro in fano.h) */
+#define WSPR_ENCODE(state) \
+    ((wspr_par32((uint32_t)(state) & WSPR_POLY1) << 1) | \
+     wspr_par32((uint32_t)(state) & WSPR_POLY2))
+
+struct wspr_node {
+    uint64_t encstate; /* encoder state of next node */
+    long gamma;        /* cumulative metric to this node */
+    int metrics[4];    /* metrics indexed by all possible tx symbols */
+    int tm[2];         /* sorted metrics for current hypotheses */
+    int i;             /* current branch being tested */
+};
+
+/* wspr_fano(symbols, mettab, delta, maxcycles) -> (ok, data, metric, cycles)
+ *
+ * Fano sequential decoder for the WSPR K=32 r=1/2 code; transcription of
+ * fano() in fano.c with nbits = 81.  symbols are the 162 deinterleaved
+ * soft symbols; mettab is the int32 (2, 256) metric table.  ok is 0 when
+ * the decoder timed out, data holds the 11 decoded bytes (50 bits + tail).
+ */
+static PyObject *
+wspr_fano(PyObject *self, PyObject *args)
+{
+    PyObject *sym_o, *met_o;
+    long delta, maxcycles;
+    PyArrayObject *sym_a = NULL, *met_a = NULL;
+    const unsigned nbits = 81;
+    uint8_t data[11];
+    long metric;
+    unsigned long cycles;
+    int ok;
+
+    if (!PyArg_ParseTuple(args, "OOll", &sym_o, &met_o, &delta, &maxcycles))
+        return NULL;
+    sym_a = as_array(sym_o, NPY_UINT8, 1, "symbols");
+    met_a = as_array(met_o, NPY_INT32, 2, "mettab");
+    if (!sym_a || !met_a)
+        goto fail;
+    if (PyArray_DIM(sym_a, 0) != WSPR_NSYM || PyArray_DIM(met_a, 0) != 2 ||
+        PyArray_DIM(met_a, 1) != 256) {
+        PyErr_SetString(PyExc_ValueError, "wspr_fano: bad array shape");
+        goto fail;
+    }
+
+    {
+        const uint8_t *symbols = (const uint8_t *)PyArray_DATA(sym_a);
+        const int32_t *m0 = (const int32_t *)PyArray_DATA(met_a);
+        const int32_t *m1 = m0 + 256;
+        struct wspr_node nodes[82];
+        struct wspr_node *np_ = nodes;
+        struct wspr_node *lastnode = &nodes[nbits - 1];
+        struct wspr_node *tail = &nodes[nbits - 31];
+        unsigned long maxtotal = (unsigned long)maxcycles * nbits;
+        unsigned long i;
+        long t, ngamma;
+        int mm0, mm1;
+        unsigned lsym, b;
+
+        Py_BEGIN_ALLOW_THREADS;
+        for (np_ = nodes; np_ <= lastnode; np_++) {
+            int s0 = symbols[0], s1 = symbols[1];
+            np_->metrics[0] = m0[s0] + m0[s1];
+            np_->metrics[1] = m0[s0] + m1[s1];
+            np_->metrics[2] = m1[s0] + m0[s1];
+            np_->metrics[3] = m1[s0] + m1[s1];
+            symbols += 2;
+        }
+        np_ = nodes;
+        np_->encstate = 0;
+
+        lsym = WSPR_ENCODE(np_->encstate);
+        mm0 = np_->metrics[lsym];
+        mm1 = np_->metrics[3 ^ lsym];
+        if (mm0 > mm1) {
+            np_->tm[0] = mm0;
+            np_->tm[1] = mm1;
+        } else {
+            np_->tm[0] = mm1;
+            np_->tm[1] = mm0;
+            np_->encstate++;
+        }
+        np_->i = 0;
+        np_->gamma = t = 0;
+
+        for (i = 1; i <= maxtotal; i++) {
+            ngamma = np_->gamma + np_->tm[np_->i];
+            if (ngamma >= t) {
+                if (np_->gamma < t + delta) {
+                    while (ngamma >= t + delta)
+                        t += delta;
+                }
+                np_[1].gamma = ngamma;
+                np_[1].encstate = np_->encstate << 1;
+                if (++np_ == (lastnode + 1))
+                    break;
+                lsym = WSPR_ENCODE(np_->encstate);
+                if (np_ >= tail) {
+                    np_->tm[0] = np_->metrics[lsym];
+                } else {
+                    mm0 = np_->metrics[lsym];
+                    mm1 = np_->metrics[3 ^ lsym];
+                    if (mm0 > mm1) {
+                        np_->tm[0] = mm0;
+                        np_->tm[1] = mm1;
+                    } else {
+                        np_->tm[0] = mm1;
+                        np_->tm[1] = mm0;
+                        np_->encstate++;
+                    }
+                }
+                np_->i = 0;
+                continue;
+            }
+            for (;;) {
+                if (np_ == nodes || np_[-1].gamma < t) {
+                    t -= delta;
+                    if (np_->i != 0) {
+                        np_->i = 0;
+                        np_->encstate ^= 1;
+                    }
+                    break;
+                }
+                if (--np_ < tail && np_->i != 1) {
+                    np_->i++;
+                    np_->encstate ^= 1;
+                    break;
+                }
+            }
+        }
+        metric = np_->gamma;
+        memset(data, 0, sizeof(data));
+        for (b = 0; b < (nbits >> 3); b++)
+            data[b] = (uint8_t)nodes[7 + 8 * b].encstate;
+        cycles = i + 1;
+        ok = (i >= maxtotal) ? 0 : 1;
+        Py_END_ALLOW_THREADS;
+    }
+
+    Py_DECREF(sym_a);
+    Py_DECREF(met_a);
+    return Py_BuildValue("iy#lk", ok, (const char *)data, (Py_ssize_t)11,
+                         metric, cycles);
+
+fail:
+    Py_XDECREF(sym_a);
+    Py_XDECREF(met_a);
+    return NULL;
+}
+
 static PyMethodDef ckernel_methods[] = {
     {"bp_hybrid", bp_hybrid, METH_VARARGS,
      "Belief-propagation loop for the (174,91) code."},
@@ -706,6 +1109,12 @@ static PyMethodDef ckernel_methods[] = {
      "Grid search of FT4 sync power over frequency/time offsets."},
     {"crc14_check", crc14_check, METH_VARARGS,
      "Check a 91-bit message+CRC block."},
+    {"wspr_sync_demod", wspr_sync_demod, METH_VARARGS,
+     "WSPR sync search over lag/frequency grids."},
+    {"wspr_ncsd", wspr_ncsd, METH_VARARGS,
+     "WSPR noncoherent block demodulation to 162 soft symbols."},
+    {"wspr_fano", wspr_fano, METH_VARARGS,
+     "Fano sequential decoder for the WSPR K=32 convolutional code."},
     {NULL, NULL, 0, NULL},
 };
 

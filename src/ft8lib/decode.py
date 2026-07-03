@@ -22,11 +22,12 @@ class Decode:
 
     message: str
     snr: float          # estimated SNR in 2500 Hz (dB)
-    dt: float           # time offset relative to nominal 0.5 s start (s)
-    freq: float         # audio frequency of lowest tone (Hz)
+    dt: float           # time offset relative to the nominal start (s)
+    freq: float         # audio frequency of lowest tone (FT8/FT4) or center (WSPR)
     sync: float         # sync-quality score
     mode: str = "FT8"
     ap: int = 0         # a-priori type used (0 = none; 1..6 as in WSJT-X)
+    drift: float = 0.0  # linear frequency drift over the transmission (WSPR, Hz)
 
     def __str__(self):
         apstr = f"  a{self.ap}" if self.ap else ""

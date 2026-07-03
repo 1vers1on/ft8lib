@@ -662,17 +662,25 @@ def _ft4_sync_templates():
 
 
 _FT4_TEMPLATES = _ft4_sync_templates()
+_FT4_TEMPLATES_ARR = np.stack(_FT4_TEMPLATES).astype(complex)
+_FT4_OFFSETS_ARR = np.array(_FT4_SYNC_OFFSETS, dtype=np.int64)
+_FT4_DT_EFF = 2.0 / (SAMPLE_RATE / FT4.NDOWN)  # stride-2 sample interval
 
 
 def _ft4_sync_search(cd2: np.ndarray, idf_range, istart_range) -> tuple:
     """Grid search of sync power over frequency offsets and start samples."""
-    n64 = 2 * _FT4_NSS
-    dt_eff = 2.0 / (SAMPLE_RATE / FT4.NDOWN)  # stride-2 sample interval
     istarts = np.fromiter(istart_range, dtype=np.int64)
+    idfs = np.fromiter(idf_range, dtype=np.int64)
+    if _kernels.HAVE_FAST:
+        val, istart, idf = _kernels.ft4_sync_search(
+            cd2, istarts, idfs, _FT4_DT_EFF, _FT4_TEMPLATES_ARR, _FT4_OFFSETS_ARR)
+        return float(val), int(istart), int(idf)
+
+    n64 = 2 * _FT4_NSS
     taps = np.arange(0, 4 * _FT4_NSS, 2)
     best = (-1.0, 0, 0)
-    for idf in idf_range:
-        twk = np.exp(1j * 2 * np.pi * idf * dt_eff * np.arange(n64))
+    for idf in idfs.tolist():
+        twk = np.exp(1j * 2 * np.pi * idf * _FT4_DT_EFF * np.arange(n64))
         sync = np.zeros(len(istarts))
         for b, boff in enumerate(_FT4_SYNC_OFFSETS):
             i1 = istarts + boff

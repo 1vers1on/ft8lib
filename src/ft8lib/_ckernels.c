@@ -20,6 +20,7 @@
 #define LDPC_K 91  /* message bits (77 + CRC14) */
 
 #define CRC_POLY 0x2757u
+#define FT8LIB_PI 3.14159265358979323846
 
 /* CRC-14 check of the first 91 bits of a codeword (port of crc.py). */
 static int
@@ -537,6 +538,138 @@ fail:
     return NULL;
 }
 
+/* ft4_sync_search(cd2, istarts, idfs, dt_eff, templates, offsets)
+ *   -> (best_sync, best_istart, best_idf)
+ *
+ * Grid search of FT4 sync power over frequency offsets (idfs, Hz) and
+ * block start samples (istarts), port of _ft4_sync_search in decode.py.
+ * templates is the (nblocks, n64) stride-2 Costas sync waveform set;
+ * offsets are the block start offsets (in stride-2 samples) within one
+ * FT4 message.  Mirrors the per-idf argmax-then-compare logic exactly,
+ * including its first-occurrence tie-breaking.
+ */
+static PyObject *
+ft4_sync_search(PyObject *self, PyObject *args)
+{
+    PyObject *cd2_o, *istarts_o, *idfs_o, *templates_o, *offsets_o;
+    double dt_eff;
+    PyArrayObject *cd2_a = NULL, *istarts_a = NULL, *idfs_a = NULL,
+                  *templates_a = NULL, *offsets_a = NULL;
+
+    if (!PyArg_ParseTuple(args, "OOOdOO", &cd2_o, &istarts_o, &idfs_o,
+                          &dt_eff, &templates_o, &offsets_o))
+        return NULL;
+
+    cd2_a = as_array(cd2_o, NPY_CDOUBLE, 1, "cd2");
+    istarts_a = as_array(istarts_o, NPY_INT64, 1, "istarts");
+    idfs_a = as_array(idfs_o, NPY_INT64, 1, "idfs");
+    templates_a = as_array(templates_o, NPY_CDOUBLE, 2, "templates");
+    offsets_a = as_array(offsets_o, NPY_INT64, 1, "offsets");
+    if (!cd2_a || !istarts_a || !idfs_a || !templates_a || !offsets_a)
+        goto fail;
+
+    {
+        const npy_intp ndmax = PyArray_DIM(cd2_a, 0);
+        const npy_intp n_istart = PyArray_DIM(istarts_a, 0);
+        const npy_intp n_idf = PyArray_DIM(idfs_a, 0);
+        const npy_intp nblocks = PyArray_DIM(templates_a, 0);
+        const npy_intp n64 = PyArray_DIM(templates_a, 1);
+
+        if (PyArray_DIM(offsets_a, 0) != nblocks) {
+            PyErr_SetString(PyExc_ValueError,
+                            "ft4_sync_search: offsets/templates mismatch");
+            goto fail;
+        }
+
+        {
+            const double *cd2 = (const double *)PyArray_DATA(cd2_a);
+            const int64_t *istarts = (const int64_t *)PyArray_DATA(istarts_a);
+            const int64_t *idfs = (const int64_t *)PyArray_DATA(idfs_a);
+            const double *templ = (const double *)PyArray_DATA(templates_a);
+            const int64_t *offsets = (const int64_t *)PyArray_DATA(offsets_a);
+
+            double best_val = -1.0;
+            int64_t best_istart = 0, best_idf = 0;
+            double *cr = PyMem_Malloc(n64 * sizeof(double));
+            double *ci = PyMem_Malloc(n64 * sizeof(double));
+            npy_intp fi, si, b, k;
+
+            if (!cr || !ci) {
+                PyMem_Free(cr);
+                PyMem_Free(ci);
+                PyErr_NoMemory();
+                goto fail;
+            }
+
+            Py_BEGIN_ALLOW_THREADS;
+            for (fi = 0; fi < n_idf; fi++) {
+                int64_t idf = idfs[fi];
+                double row_best = -1.0;
+                int64_t row_best_istart = 0;
+
+                for (k = 0; k < n64; k++) {
+                    double phi = 2.0 * FT8LIB_PI * (double)idf * dt_eff * (double)k;
+                    cr[k] = cos(phi);
+                    ci[k] = -sin(phi);
+                }
+
+                for (si = 0; si < n_istart; si++) {
+                    int64_t istart = istarts[si];
+                    double sync = 0.0;
+
+                    for (b = 0; b < nblocks; b++) {
+                        int64_t i1 = istart + offsets[b];
+                        if (i1 < 0 || i1 + 2 * n64 - 1 > ndmax - 1)
+                            continue;
+                        {
+                            double zr = 0.0, zi = 0.0;
+                            const double *tb = templ + 2 * b * n64;
+                            for (k = 0; k < n64; k++) {
+                                int64_t idx = i1 + 2 * k;
+                                double xr = cd2[2 * idx], xi = cd2[2 * idx + 1];
+                                double tr = tb[2 * k], ti = tb[2 * k + 1];
+                                double combined_re = tr * cr[k] + ti * ci[k];
+                                double combined_im = tr * ci[k] - ti * cr[k];
+                                zr += xr * combined_re - xi * combined_im;
+                                zi += xr * combined_im + xi * combined_re;
+                            }
+                            sync += sqrt(zr * zr + zi * zi);
+                        }
+                    }
+                    if (sync > row_best) {
+                        row_best = sync;
+                        row_best_istart = istart;
+                    }
+                }
+                if (row_best > best_val) {
+                    best_val = row_best;
+                    best_istart = row_best_istart;
+                    best_idf = idf;
+                }
+            }
+            Py_END_ALLOW_THREADS;
+
+            PyMem_Free(cr);
+            PyMem_Free(ci);
+
+            Py_DECREF(cd2_a);
+            Py_DECREF(istarts_a);
+            Py_DECREF(idfs_a);
+            Py_DECREF(templates_a);
+            Py_DECREF(offsets_a);
+            return Py_BuildValue("dLL", best_val, best_istart, best_idf);
+        }
+    }
+
+fail:
+    Py_XDECREF(cd2_a);
+    Py_XDECREF(istarts_a);
+    Py_XDECREF(idfs_a);
+    Py_XDECREF(templates_a);
+    Py_XDECREF(offsets_a);
+    return NULL;
+}
+
 /* crc14_check(bits91) -> bool: check a 91-bit message+CRC block. */
 static PyObject *
 crc14_check(PyObject *self, PyObject *args)
@@ -569,6 +702,8 @@ static PyMethodDef ckernel_methods[] = {
      "Ordered-statistics decode of one LLR vector."},
     {"sync8d", sync8d, METH_VARARGS,
      "Sync power of a downsampled FT8 signal."},
+    {"ft4_sync_search", ft4_sync_search, METH_VARARGS,
+     "Grid search of FT4 sync power over frequency/time offsets."},
     {"crc14_check", crc14_check, METH_VARARGS,
      "Check a 91-bit message+CRC block."},
     {NULL, NULL, 0, NULL},

@@ -13,6 +13,7 @@ try:
     from ._ckernels import (  # noqa: F401
         bp_hybrid,
         crc14_check,
+        ft4_sync_search,
         osd,
         osd_ge,
         sync8d,

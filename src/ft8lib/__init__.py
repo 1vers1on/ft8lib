@@ -17,7 +17,13 @@ Quick start::
 """
 
 from .crc import crc14, crc14_check
-from .decode import Decode, decode_ft4, decode_ft8
+from .decode import (
+    Decode,
+    decode_ft4,
+    decode_ft4_stream,
+    decode_ft8,
+    decode_ft8_stream,
+)
 from .encode import (
     encode_ft4,
     encode_ft8,
@@ -29,6 +35,7 @@ from .encode import (
 from .ldpc import bp_decode, decode174_91, encode174_91, osd_decode
 from .pack import HashTable, pack77, unpack77
 from .protocol import FT4, FT8, SAMPLE_RATE
+from .realtime import RealtimeDecoder, decode_realtime
 from .subtract import subtract_ft4, subtract_ft8
 
 __version__ = "0.2.0"
@@ -39,13 +46,17 @@ __all__ = [
     "SAMPLE_RATE",
     "Decode",
     "HashTable",
+    "RealtimeDecoder",
     "__version__",
     "bp_decode",
     "crc14",
     "crc14_check",
     "decode174_91",
     "decode_ft4",
+    "decode_ft4_stream",
     "decode_ft8",
+    "decode_ft8_stream",
+    "decode_realtime",
     "encode174_91",
     "osd_decode",
     "subtract_ft4",

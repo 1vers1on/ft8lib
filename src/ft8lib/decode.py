@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import Iterator, List, Optional
 
 import numpy as np
 
@@ -383,34 +383,17 @@ def _ft8_softbits(cs: np.ndarray) -> List[np.ndarray]:
             for b in (bmeta, bmetb, bmetc, bmetd, bmete)]
 
 
-def decode_ft8(audio, freq_min: float = 200.0, freq_max: float = 4000.0,
-               syncmin: float = 1.3, max_candidates: int = 120,
-               hashes: Optional[HashTable] = None, depth: int = 3,
-               mycall: str = "", dxcall: str = "",
-               npasses: int = 3) -> List[Decode]:
-    """Decode all FT8 signals in a 15-second, 12 kHz audio array.
+def _decode_ft8_events(audio, freq_min, freq_max, syncmin, max_candidates,
+                       hashes, depth, mycall, dxcall, npasses):
+    """Run the FT8 decoder, yielding (result, is_new) as messages are found.
 
-    Parameters
-    ----------
-    audio : array-like, real audio samples at 12000 S/s (any scale).
-    freq_min, freq_max : audio frequency search range in Hz.
-    syncmin : minimum coarse sync strength (WSJT-X uses 1.3).
-    max_candidates : cap on the number of candidates to try per pass.
-    hashes : optional HashTable for <hashed> callsign resolution.
-    depth : 1 = BP only, single pass;
-            2 = BP+OSD with multi-pass signal subtraction;
-            3 = additionally use a-priori (AP) decoding.
-    mycall, dxcall : station callsigns enabling the deeper AP types
-            (MyCall ..., MyCall DxCall ...); plain "CQ" AP needs neither.
-    npasses : maximum subtraction passes at depth >= 2.
-
-    Returns a list of Decode results sorted by frequency.  Decodes found
-    with a-priori information carry the AP type in the ``ap`` field.
+    ``is_new`` is False when the result is a better copy (higher sync) of an
+    already-yielded message.
     """
     hashes = hashes or HashTable()
     dd = _prepare(audio, FT8.NMAX).copy()
     if not np.any(dd):
-        return []
+        return
 
     max_osd = 2 if depth >= 2 else -1
     ap = _APInfo(mycall, dxcall) if depth >= 3 else None
@@ -504,6 +487,7 @@ def decode_ft8(audio, freq_min: float = 200.0, freq_max: float = 4000.0,
                     new_signals.append((itone, f1, xdt))
                 if prev is None or result.sync > prev.sync:
                     results[msg] = result
+                    yield result, prev is None
                 break
 
         if not new_signals:
@@ -511,7 +495,55 @@ def decode_ft8(audio, freq_min: float = 200.0, freq_max: float = 4000.0,
         for itone, f1, tstart in new_signals:
             subtract_ft8(dd, itone, f1, tstart)
 
+
+def decode_ft8(audio, freq_min: float = 200.0, freq_max: float = 4000.0,
+               syncmin: float = 1.3, max_candidates: int = 120,
+               hashes: Optional[HashTable] = None, depth: int = 3,
+               mycall: str = "", dxcall: str = "",
+               npasses: int = 3) -> List[Decode]:
+    """Decode all FT8 signals in a 15-second, 12 kHz audio array.
+
+    Parameters
+    ----------
+    audio : array-like, real audio samples at 12000 S/s (any scale).
+    freq_min, freq_max : audio frequency search range in Hz.
+    syncmin : minimum coarse sync strength (WSJT-X uses 1.3).
+    max_candidates : cap on the number of candidates to try per pass.
+    hashes : optional HashTable for <hashed> callsign resolution.
+    depth : 1 = BP only, single pass;
+            2 = BP+OSD with multi-pass signal subtraction;
+            3 = additionally use a-priori (AP) decoding.
+    mycall, dxcall : station callsigns enabling the deeper AP types
+            (MyCall ..., MyCall DxCall ...); plain "CQ" AP needs neither.
+    npasses : maximum subtraction passes at depth >= 2.
+
+    Returns a list of Decode results sorted by frequency.  Decodes found
+    with a-priori information carry the AP type in the ``ap`` field.
+    """
+    results = {}
+    for result, _ in _decode_ft8_events(audio, freq_min, freq_max, syncmin,
+                                        max_candidates, hashes, depth,
+                                        mycall, dxcall, npasses):
+        results[result.message] = result
     return sorted(results.values(), key=lambda r: r.freq)
+
+
+def decode_ft8_stream(audio, freq_min: float = 200.0, freq_max: float = 4000.0,
+                      syncmin: float = 1.3, max_candidates: int = 120,
+                      hashes: Optional[HashTable] = None, depth: int = 3,
+                      mycall: str = "", dxcall: str = "",
+                      npasses: int = 3) -> Iterator[Decode]:
+    """Like decode_ft8, but yield each message as soon as it decodes.
+
+    Results come in discovery order (strongest candidates first, later
+    subtraction passes last) rather than sorted by frequency; each unique
+    message is yielded once.  Parameters are those of decode_ft8.
+    """
+    for result, is_new in _decode_ft8_events(audio, freq_min, freq_max,
+                                             syncmin, max_candidates, hashes,
+                                             depth, mycall, dxcall, npasses):
+        if is_new:
+            yield result
 
 
 # ===========================================================================
@@ -740,21 +772,17 @@ def _ft4_bitmetrics(cd: np.ndarray):
     return bitmetrics, False
 
 
-def decode_ft4(audio, freq_min: float = 200.0, freq_max: float = 4000.0,
-               syncmin: float = 1.18, max_candidates: int = 100,
-               hashes: Optional[HashTable] = None, depth: int = 3,
-               mycall: str = "", dxcall: str = "",
-               npasses: int = 3) -> List[Decode]:
-    """Decode all FT4 signals in a 7.5-second, 12 kHz audio array.
+def _decode_ft4_events(audio, freq_min, freq_max, syncmin, max_candidates,
+                       hashes, depth, mycall, dxcall, npasses):
+    """Run the FT4 decoder, yielding (result, is_new) as messages are found.
 
-    Accepts audio of up to 6.048 s (72576 samples); shorter arrays are
-    zero-padded.  See decode_ft8 for the meaning of depth/mycall/dxcall.
-    Returns a list of Decode results sorted by frequency.
+    ``is_new`` is False when the result is a better copy (higher sync) of an
+    already-yielded message.
     """
     hashes = hashes or HashTable()
     dd = _prepare(audio, FT4.NMAX).copy()
     if not np.any(dd):
-        return []
+        return
 
     max_osd = 2 if depth >= 2 else -1
     ap = _APInfo(mycall, dxcall) if depth >= 3 else None
@@ -845,6 +873,7 @@ def decode_ft4(audio, freq_min: float = 200.0, freq_max: float = 4000.0,
                     new_signals.append((itone, f1, ibest / fs2))
                 if prev is None or result.sync > prev.sync:
                     results[msg] = result
+                    yield result, prev is None
                 break
 
         if not new_signals:
@@ -852,4 +881,39 @@ def decode_ft4(audio, freq_min: float = 200.0, freq_max: float = 4000.0,
         for itone, f1, tstart in new_signals:
             subtract_ft4(dd, itone, f1, tstart)
 
+
+def decode_ft4(audio, freq_min: float = 200.0, freq_max: float = 4000.0,
+               syncmin: float = 1.18, max_candidates: int = 100,
+               hashes: Optional[HashTable] = None, depth: int = 3,
+               mycall: str = "", dxcall: str = "",
+               npasses: int = 3) -> List[Decode]:
+    """Decode all FT4 signals in a 7.5-second, 12 kHz audio array.
+
+    Accepts audio of up to 6.048 s (72576 samples); shorter arrays are
+    zero-padded.  See decode_ft8 for the meaning of depth/mycall/dxcall.
+    Returns a list of Decode results sorted by frequency.
+    """
+    results = {}
+    for result, _ in _decode_ft4_events(audio, freq_min, freq_max, syncmin,
+                                        max_candidates, hashes, depth,
+                                        mycall, dxcall, npasses):
+        results[result.message] = result
     return sorted(results.values(), key=lambda r: r.freq)
+
+
+def decode_ft4_stream(audio, freq_min: float = 200.0, freq_max: float = 4000.0,
+                      syncmin: float = 1.18, max_candidates: int = 100,
+                      hashes: Optional[HashTable] = None, depth: int = 3,
+                      mycall: str = "", dxcall: str = "",
+                      npasses: int = 3) -> Iterator[Decode]:
+    """Like decode_ft4, but yield each message as soon as it decodes.
+
+    Results come in discovery order (strongest candidates first, later
+    subtraction passes last) rather than sorted by frequency; each unique
+    message is yielded once.  Parameters are those of decode_ft4.
+    """
+    for result, is_new in _decode_ft4_events(audio, freq_min, freq_max,
+                                             syncmin, max_candidates, hashes,
+                                             depth, mycall, dxcall, npasses):
+        if is_new:
+            yield result

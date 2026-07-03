@@ -56,5 +56,7 @@ Thumbs.db
 wsjtx
 
 *.so
+*.pyd
+*.dll
 
 cq.wav

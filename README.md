@@ -50,6 +50,28 @@ Each decode is a `ft8lib.Decode` with fields `message`, `snr` (dB in 2500 Hz),
 `dt` (seconds relative to the nominal 0.5 s start), `freq` (Hz), `sync`, and
 `mode`.
 
+### Realtime decoding
+
+To decode live audio, feed a `RealtimeDecoder` blocks of samples as they
+arrive (starting at a cycle boundary).  Like WSJT-X, it runs decode attempts
+part-way through the receive period (FT8: 11.8, 13.5 and 14.7 s; FT4: 5.6
+and 6.05 s), so most messages are reported seconds before the period ends,
+and it rolls over automatically at each cycle boundary:
+
+```python
+rt = ft8lib.RealtimeDecoder("FT8", mycall="K1ABC")
+for block in audio_blocks:            # e.g. sound-card capture callback
+    for result in rt.feed(block):     # new decodes, as soon as they appear
+        print(rt.cycle, result)
+rt.flush()                            # decode a partial final period
+```
+
+`ft8lib.decode_realtime(blocks, mode="FT8")` wraps this as a generator over
+an iterable of blocks.  For a single already-captured period there are also
+`decode_ft8_stream` / `decode_ft4_stream`, generator versions of the batch
+decoders that yield each message as soon as it decodes instead of returning
+the full list at the end.
+
 Lower-level building blocks are exposed too:
 
 ```python

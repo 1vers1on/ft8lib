@@ -225,12 +225,15 @@ def _ft8_candidates(dd: np.ndarray, nfa: float, nfb: float, syncmin: float,
         t = ta + tb + tc
         t0 = (t0a + t0b + t0c - t) / 6.0
         sync_abc = t / t0
+        t2 = ta + tb
+        t02 = (t0a + t0b - t2) / 6.0
+        sync_ab = t2 / t02
         t2 = tb + tc
         t02 = (t0b + t0c - t2) / 6.0
         sync_bc = t2 / t02
     sync2d = np.fmax(np.nan_to_num(sync_abc, nan=0.0, posinf=0.0, neginf=0.0),
+                     np.nan_to_num(sync_ab, nan=0.0, posinf=0.0, neginf=0.0),
                      np.nan_to_num(sync_bc, nan=0.0, posinf=0.0, neginf=0.0))
-
     mlag = 13
     lag_lo = sync2d[:, jz - mlag:jz + mlag + 1]
     jpeak = lag_lo.argmax(axis=1) - mlag

@@ -155,7 +155,9 @@ class RealtimeDecoder:
 
     def _attempt(self) -> List[Decode]:
         new = []
-        for result, is_new in self._events(self._buf, **self._kwargs):
+        valid_audio = self._buf[:self._filled]
+        
+        for result, is_new in self._events(valid_audio, **self._kwargs):
             if is_new and result.message not in self._seen:
                 self._seen.add(result.message)
                 new.append(result)
